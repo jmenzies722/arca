@@ -1,0 +1,43 @@
+# Arca Configuration
+# Copy to ~/.arca/config.toml or place in your project root
+
+[arca]
+persona = "Arca"
+voice_enabled = true
+ambient_mode = false            # Listens passively and speaks up proactively
+
+[voice]
+stt_model = "base.en"          # Whisper model: tiny.en, base.en, small.en, medium.en, large-v3
+stt_device = "auto"            # auto, cpu, cuda
+push_to_talk_key = "ctrl+space"
+wake_word = "hey arca"         # Set to "" to disable
+vad_threshold = 0.5            # 0.0-1.0 — sensitivity of silence detection
+vad_silence_ms = 800           # ms of silence before stopping recording
+
+[tts]
+enabled = true
+engine = "kokoro"              # kokoro | openai | none
+voice = "af_heart"             # Kokoro voice ID
+speed = 1.1
+openai_voice = "nova"          # Used if engine = "openai"
+
+[agent]
+model = "claude-sonnet-4-6"
+max_tokens = 8096
+temperature = 1.0
+system_prompt_extra = ""       # Appended to base system prompt
+
+[tools]
+shell = true                   # Allow shell command execution
+file_ops = true                # Allow file read/write
+web_search = true              # Allow web search (requires BRAVE_API_KEY or TAVILY_API_KEY)
+mcp_passthrough = true         # Allow MCP tool calls
+
+[memory]
+session_history = 50           # Max messages to keep in context
+db_path = "~/.arca/memory.db"  # SQLite database path
+
+[shell]
+default_shell = "/bin/zsh"
+working_dir = "."              # Default CWD for shell commands
+timeout = 30                   # Default command timeout seconds
