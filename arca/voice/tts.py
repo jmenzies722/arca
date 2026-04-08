@@ -54,19 +54,42 @@ class TTS:
         if engine == "kokoro":
             self._init_kokoro()
 
+    _KOKORO_DIR = os.path.expanduser("~/.arca/kokoro")
+    _MODEL_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx"
+    _VOICES_URL = "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin"
+
     def _init_kokoro(self) -> None:
-        """Lazy-load Kokoro model (downloads on first run, ~82MB)."""
+        """Load Kokoro model from ~/.arca/kokoro/, downloading if needed."""
         try:
             from kokoro_onnx import Kokoro
 
-            self._kokoro = Kokoro("kokoro-v1.0.onnx", "voices-v1.0.bin")
+            os.makedirs(self._KOKORO_DIR, exist_ok=True)
+            model_path = os.path.join(self._KOKORO_DIR, "kokoro-v1.0.onnx")
+            voices_path = os.path.join(self._KOKORO_DIR, "voices-v1.0.bin")
+
+            if not os.path.exists(model_path):
+                print("[arca/tts] Downloading Kokoro ONNX model (~82MB)...")
+                self._download(self._MODEL_URL, model_path)
+
+            if not os.path.exists(voices_path):
+                print("[arca/tts] Downloading Kokoro voices (~11MB)...")
+                self._download(self._VOICES_URL, voices_path)
+
+            self._kokoro = Kokoro(model_path, voices_path)
+
         except ImportError:
             print("[arca/tts] kokoro-onnx not installed. Install: pip install kokoro-onnx")
             print("[arca/tts] Falling back to no TTS output.")
             self.engine = "none"
-        except FileNotFoundError:
-            print("[arca/tts] Kokoro model files not found. Run: python -m kokoro_onnx.download")
+        except Exception as e:
+            print(f"[arca/tts] Failed to initialize Kokoro: {e}")
+            print("[arca/tts] Falling back to no TTS output.")
             self.engine = "none"
+
+    @staticmethod
+    def _download(url: str, dest: str) -> None:
+        import urllib.request
+        urllib.request.urlretrieve(url, dest)
 
     def speak(self, text: str, blocking: bool = True) -> None:
         """

@@ -129,17 +129,19 @@ class ArcaApp(App):
         self,
         agent_runner: Callable[[str], None],
         voice_trigger: Callable | None = None,
+        reset_callback: Callable | None = None,
         **kwargs,
     ):
         """
         Args:
             agent_runner: Callable that takes user text and runs the agent.
-                          Should post results back via self.post_message or callbacks.
             voice_trigger: Optional callable to trigger voice recording.
+            reset_callback: Optional callable to reset the agent conversation history.
         """
         super().__init__(**kwargs)
         self._agent_runner = agent_runner
         self._voice_trigger = voice_trigger
+        self._reset_callback = reset_callback
         self._is_recording = False
         self._is_thinking = False
 
@@ -190,6 +192,8 @@ class ArcaApp(App):
 
     def action_reset_conversation(self) -> None:
         """Ctrl+R — clear conversation history."""
+        if self._reset_callback:
+            self._reset_callback()
         self._print_system("Conversation reset.")
 
     def action_clear_output(self) -> None:
@@ -229,6 +233,13 @@ class ArcaApp(App):
                 if len(result["stdout"].splitlines()) > 10:
                     log.write(Text.from_markup("  [dim]... (truncated)[/]"))
 
+    def print_ambient(self, suggestion: str) -> None:
+        """Render a proactive ambient suggestion from the background monitor."""
+        log = self.query_one("#output", RichLog)
+        log.write(Text.from_markup(
+            f"\n[bold yellow]◉ Arca[/] [dim](ambient)[/]  {escape(suggestion)}"
+        ))
+
     def _print_system(self, message: str) -> None:
         log = self.query_one("#output", RichLog)
         log.write(Text.from_markup(f"\n[dim italic]{escape(message)}[/]"))
@@ -249,13 +260,13 @@ class ArcaApp(App):
         threading.Thread(target=run, daemon=True).start()
 
     def set_recording_state(self, recording: bool) -> None:
-        """Called from voice pipeline thread."""
+        """Called via call_from_thread — already on the main thread, call status directly."""
         self._is_recording = recording
         status = self.query_one("#status", StatusBar)
         if recording:
-            self.call_from_thread(status.set_recording)
+            status.set_recording()
         else:
-            self.call_from_thread(status.set_idle)
+            status.set_idle()
 
     def _set_thinking(self, thinking: bool) -> None:
         self._is_thinking = thinking

@@ -17,6 +17,20 @@ if [[ "$(printf '%s\n' "$required" "$python_version" | sort -V | head -n1)" != "
 fi
 echo "✓ Python $python_version"
 
+# Create / reuse virtualenv
+VENV_DIR=".venv"
+if [ ! -d "$VENV_DIR" ]; then
+    echo ""
+    echo "Creating virtualenv at .venv ..."
+    python3 -m venv "$VENV_DIR"
+    echo "✓ Virtualenv created"
+else
+    echo "✓ Virtualenv exists at .venv"
+fi
+
+# Activate venv for this script
+source "$VENV_DIR/bin/activate"
+
 # Install core package in editable mode
 echo ""
 echo "Installing Arca core..."
@@ -26,29 +40,40 @@ echo "✓ Core dependencies installed"
 # Download Whisper model
 echo ""
 echo "Downloading Whisper base.en model (~145MB)..."
-python3 -c "
+python -c "
 from faster_whisper import WhisperModel
 print('  Downloading...')
 model = WhisperModel('base.en', device='auto', compute_type='auto')
 print('  ✓ Model ready')
 "
 
-# Download Kokoro TTS model
+# Download Kokoro TTS model files to ~/.arca/kokoro/
 echo ""
-echo "Downloading Kokoro TTS model (~82MB)..."
-python3 -c "
-try:
-    import kokoro_onnx
-    print('  Running: python -m kokoro_onnx.download')
-    import subprocess
-    subprocess.run(['python3', '-m', 'kokoro_onnx.download'], check=True)
-    print('  ✓ Kokoro TTS ready')
-except ImportError:
-    print('  kokoro-onnx not installed, skipping TTS setup')
-except Exception as e:
-    print(f'  Warning: {e}')
-    print('  Run manually: python3 -m kokoro_onnx.download')
-"
+echo "Downloading Kokoro TTS model files..."
+mkdir -p ~/.arca/kokoro
+
+KOKORO_MODEL=~/.arca/kokoro/kokoro-v1.0.onnx
+KOKORO_VOICES=~/.arca/kokoro/voices-v1.0.bin
+
+if [ ! -f "$KOKORO_MODEL" ]; then
+    echo "  Downloading kokoro-v1.0.onnx (~82MB)..."
+    curl -L -o "$KOKORO_MODEL" \
+        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx" \
+        --progress-bar
+    echo "  ✓ Model downloaded"
+else
+    echo "  ✓ kokoro-v1.0.onnx already present"
+fi
+
+if [ ! -f "$KOKORO_VOICES" ]; then
+    echo "  Downloading voices-v1.0.bin (~11MB)..."
+    curl -L -o "$KOKORO_VOICES" \
+        "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin" \
+        --progress-bar
+    echo "  ✓ Voices downloaded"
+else
+    echo "  ✓ voices-v1.0.bin already present"
+fi
 
 # Create user config dir
 echo ""
@@ -73,7 +98,8 @@ fi
 echo ""
 echo "=== Setup complete! ==="
 echo ""
-echo "Run Arca:"
+echo "Activate the virtualenv first, then run Arca:"
+echo "  source .venv/bin/activate"
 echo "  arca                  # Full TUI with voice"
 echo "  arca --no-voice       # Text-only mode"
 echo "  arca --text 'hello'   # One-shot query"

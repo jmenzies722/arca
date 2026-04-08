@@ -41,3 +41,43 @@ db_path = "~/.arca/memory.db"  # SQLite database path
 default_shell = "/bin/zsh"
 working_dir = "."              # Default CWD for shell commands
 timeout = 30                   # Default command timeout seconds
+
+# ── Phase 2: Project Context ───────────────────────────────────────────────────
+[context]
+enabled = true
+read_claude_md = true
+read_readme = true
+read_git_info = true
+max_context_chars = 6000
+
+# ── Phase 2: Ambient Monitoring ───────────────────────────────────────────────
+[ambient]
+enabled = false                # Set true to enable proactive suggestions
+model = "claude-haiku-4-5-20251001"
+min_interval_s = 30.0
+speak_suggestions = true
+
+# ── Phase 2: Wake Word ────────────────────────────────────────────────────────
+# (in [voice] section above — added fields:)
+# wake_word_enabled = false
+# wake_word_engine = "openwakeword"    # openwakeword | porcupine
+# wake_word_model = "hey_jarvis"       # Phonetically close to "hey arca"
+# wake_word_threshold = 0.5
+# porcupine_key = ""
+
+# ── Phase 2: MCP Servers ──────────────────────────────────────────────────────
+# Add MCP servers here to give Arca access to their tools.
+# Each server is a process that Arca spawns and connects to via stdio.
+#
+# Example — GitHub MCP server:
+# [[mcp.servers]]
+# name = "github"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+# env = { GITHUB_PERSONAL_ACCESS_TOKEN = "$GITHUB_TOKEN" }
+#
+# Example — Filesystem MCP server:
+# [[mcp.servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/admin"]

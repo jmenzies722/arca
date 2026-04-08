@@ -1,37 +1,30 @@
 """
 Claude Agentic Loop — the brain of Arca.
 
-This is the core "think → act → observe → repeat" cycle:
+Phase 2 additions:
+  - Project context injected into system prompt at startup
+  - Semantic memory search: relevant past exchanges prepended to history
+  - MCP tool passthrough: Claude can call any connected MCP server tool
+  - Ambient monitor: shell results fed to background error detector
 
+The core "think → act → observe → repeat" cycle is unchanged:
   1. User sends a message (text or transcribed voice)
-  2. Claude processes it with full conversation history
-  3. Claude may call tools (shell, file, web) — we execute them
+  2. Claude processes it with context + history + semantic memory
+  3. Claude may call tools (shell, file, web, MCP) — we execute them
   4. Tool results go back to Claude as "tool" role messages
   5. Claude continues until it produces a final text response
-  6. Final response returned to the UI and TTS
-
-This loop is identical to how Claude Code works internally.
-Claude is given the tool schemas and autonomously decides
-which tools to call, in what order, with what parameters.
-
-Key design decisions:
-  - Streaming: We stream Claude's text tokens for low-latency display
-  - Tool approval: Phase 1 auto-approves all tools. Phase 2 adds confirmation UI.
-  - System prompt: Informs Claude of its persona, the user's context, and rules
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Callable, Generator, Iterator
+from typing import Callable
 
 import anthropic
 
 from .memory import Memory
 from .tools import TOOL_SCHEMAS, dispatch_tool
-
-# ─── System Prompt ─────────────────────────────────────────────────────────────
 
 BASE_SYSTEM_PROMPT = """You are Arca, an AI terminal companion. You run locally on the user's machine with full tool access.
 
@@ -50,25 +43,34 @@ Rules:
 Context: The user's current directory is provided in each message. Read it to understand what project you're working in."""
 
 
-def _build_system(config, extra: str = "") -> str:
+def _build_system(config, project_context: str = "", extra: str = "") -> str:
     persona = getattr(config, "persona", "Arca") if config else "Arca"
     system = BASE_SYSTEM_PROMPT.replace("Arca", persona, 1)
+    if project_context:
+        system += f"\n\n{project_context}"
     if extra:
         system += f"\n\n{extra}"
     return system
 
 
-# ─── Agent Loop ────────────────────────────────────────────────────────────────
-
 class AgentLoop:
     """
     The main Claude agentic loop.
-    Handles multi-turn conversation with tool use.
+    Phase 2: project context + semantic memory + MCP tools + ambient feeding.
     """
 
-    def __init__(self, config=None, memory: Memory | None = None):
+    def __init__(
+        self,
+        config=None,
+        memory: Memory | None = None,
+        mcp_client=None,
+        ambient_monitor=None,
+        project_context: str = "",
+    ):
         self.config = config
         self.memory = memory or Memory()
+        self.mcp_client = mcp_client
+        self.ambient_monitor = ambient_monitor
 
         api_key = (
             getattr(config, "anthropic_api_key", None)
@@ -76,35 +78,40 @@ class AgentLoop:
         )
         self._client = anthropic.Anthropic(api_key=api_key)
 
-        model = getattr(getattr(config, "agent", None), "model", "claude-sonnet-4-6")
-        max_tokens = getattr(getattr(config, "agent", None), "max_tokens", 8096)
-        extra_prompt = getattr(getattr(config, "agent", None), "system_prompt_extra", "")
+        agent_cfg = getattr(config, "agent", None)
+        self._model = getattr(agent_cfg, "model", "claude-sonnet-4-6")
+        self._max_tokens = getattr(agent_cfg, "max_tokens", 8096)
+        extra_prompt = getattr(agent_cfg, "system_prompt_extra", "")
 
-        self._model = model
-        self._max_tokens = max_tokens
-        self._system = _build_system(config, extra_prompt)
+        self._system = _build_system(config, project_context, extra_prompt)
+        self._tools = self._build_tool_list()
 
-        # Active tool schemas (filtered by config)
-        self._tools = self._enabled_tools()
-
-    def _enabled_tools(self) -> list[dict]:
+    def _build_tool_list(self) -> list[dict]:
+        """Merge built-in tools + MCP tools, filtered by config."""
         tools_cfg = getattr(self.config, "tools", None)
-        if tools_cfg is None:
-            return TOOL_SCHEMAS
 
         enabled = []
         for schema in TOOL_SCHEMAS:
             name = schema["name"]
-            if name in ("shell_exec",) and not getattr(tools_cfg, "shell", True):
+            if name == "shell_exec" and not getattr(tools_cfg, "shell", True):
                 continue
-            if name in ("file_read", "file_write", "file_edit", "list_dir") and not getattr(
-                tools_cfg, "file_ops", True
-            ):
+            if name in ("file_read", "file_write", "file_edit", "list_dir") \
+                    and not getattr(tools_cfg, "file_ops", True):
                 continue
-            if name in ("web_search",) and not getattr(tools_cfg, "web_search", True):
+            if name == "web_search" and not getattr(tools_cfg, "web_search", True):
                 continue
             enabled.append(schema)
+
+        # Add MCP tools if client is connected and passthrough is enabled
+        if self.mcp_client and getattr(tools_cfg, "mcp_passthrough", True):
+            mcp_tools = self.mcp_client.list_tools()
+            enabled.extend(mcp_tools)
+
         return enabled
+
+    def refresh_mcp_tools(self) -> None:
+        """Rebuild tool list after MCP servers connect (call after mcp_client.start())."""
+        self._tools = self._build_tool_list()
 
     def run(
         self,
@@ -116,25 +123,22 @@ class AgentLoop:
         """
         Process one user turn through the full agentic loop.
 
-        Args:
-            user_input: The user's message (text or transcribed voice).
-            on_text_chunk: Called with each streamed text token for live display.
-            on_tool_start: Called when Claude invokes a tool (name, inputs).
-            on_tool_end: Called when a tool finishes (name, result).
-
-        Returns:
-            The final assistant text response.
+        Phase 2: semantic context is prepended before the conversation history.
         """
-        # Add context: current directory
         augmented_input = f"[CWD: {os.getcwd()}]\n\n{user_input}"
 
-        # Add to memory and get history
+        # Phase 2: Semantic search for relevant past context
+        semantic_context = self.memory.semantic_search(user_input)
+
         self.memory.add_message("user", augmented_input)
-        messages = self.memory.load_history()
+        history = self.memory.load_history()
+
+        # Prepend semantic context (if any) before current history
+        # These are "ghost" messages — help Claude without cluttering main history
+        messages = semantic_context + history if semantic_context else history
 
         final_text = ""
 
-        # Agentic loop — keeps going until Claude stops requesting tools
         while True:
             response_text, tool_calls = self._call_claude(
                 messages=messages,
@@ -145,11 +149,9 @@ class AgentLoop:
                 final_text = response_text
 
             if not tool_calls:
-                # No more tools — Claude is done
                 self.memory.add_message("assistant", response_text)
                 break
 
-            # Execute tool calls, collect results
             tool_results = []
             for tool_call in tool_calls:
                 tool_name = tool_call["name"]
@@ -159,7 +161,20 @@ class AgentLoop:
                 if on_tool_start:
                     on_tool_start(tool_name, tool_input)
 
-                result = dispatch_tool(tool_name, tool_input, self.config)
+                # Route: MCP tool or built-in
+                if tool_name.startswith("mcp__") and self.mcp_client:
+                    result = self.mcp_client.call_tool(tool_name, tool_input)
+                else:
+                    result = dispatch_tool(tool_name, tool_input, self.config)
+
+                # Feed shell results to ambient monitor
+                if tool_name == "shell_exec" and self.ambient_monitor:
+                    self.ambient_monitor.feed(
+                        command=tool_input.get("command", ""),
+                        stdout=result.get("stdout", ""),
+                        stderr=result.get("stderr", ""),
+                        exit_code=result.get("exit_code", 0),
+                    )
 
                 if on_tool_end:
                     on_tool_end(tool_name, result)
@@ -170,7 +185,6 @@ class AgentLoop:
                     "content": json.dumps(result),
                 })
 
-            # Add Claude's response (with tool_use blocks) to history
             assistant_content = []
             if response_text:
                 assistant_content.append({"type": "text", "text": response_text})
@@ -185,7 +199,6 @@ class AgentLoop:
             self.memory.add_message("assistant", assistant_content)
             self.memory.add_message("user", tool_results)
 
-            # Refresh message history for next iteration
             messages = self.memory.load_history()
 
         return final_text
@@ -195,13 +208,7 @@ class AgentLoop:
         messages: list[dict],
         on_text_chunk: Callable[[str], None] | None = None,
     ) -> tuple[str, list[dict]]:
-        """
-        Make one streaming API call to Claude.
-
-        Returns:
-            (text_response, list_of_tool_calls)
-            tool_calls is empty if Claude is done.
-        """
+        """Single streaming Claude API call. Returns (text, tool_calls)."""
         text_parts: list[str] = []
         tool_calls: list[dict] = []
         current_tool: dict | None = None
@@ -220,11 +227,7 @@ class AgentLoop:
                 if event_type == "RawContentBlockStartEvent":
                     block = event.content_block
                     if block.type == "tool_use":
-                        current_tool = {
-                            "id": block.id,
-                            "name": block.name,
-                            "input": {},
-                        }
+                        current_tool = {"id": block.id, "name": block.name, "input": {}}
                         tool_input_json = ""
 
                 elif event_type == "RawContentBlockDeltaEvent":

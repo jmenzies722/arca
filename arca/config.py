@@ -17,6 +17,11 @@ class VoiceConfig:
     stt_device: str = "auto"
     push_to_talk_key: str = "ctrl+space"
     wake_word: str = "hey arca"
+    wake_word_enabled: bool = False         # Phase 2: always-on wake word
+    wake_word_engine: str = "openwakeword"  # openwakeword | porcupine
+    wake_word_model: str = "hey_jarvis"     # Phonetically close to "hey arca"
+    wake_word_threshold: float = 0.5
+    porcupine_key: str = ""
     vad_threshold: float = 0.5
     vad_silence_ms: int = 800
 
@@ -50,6 +55,9 @@ class ToolsConfig:
 class MemoryConfig:
     session_history: int = 50
     db_path: str = "~/.arca/memory.db"
+    semantic_search: bool = True            # Phase 2: chromadb similarity search
+    semantic_db_path: str = "~/.arca/vectors"
+    semantic_top_k: int = 5                 # How many similar past messages to include
 
 
 @dataclass
@@ -57,6 +65,39 @@ class ShellConfig:
     default_shell: str = "/bin/zsh"
     working_dir: str = "."
     timeout: int = 30
+
+
+@dataclass
+class ContextConfig:
+    """Phase 2: Project context auto-detection."""
+    enabled: bool = True
+    read_claude_md: bool = True
+    read_readme: bool = True
+    read_git_info: bool = True
+    max_context_chars: int = 6000           # Limit to avoid token bloat
+
+
+@dataclass
+class AmbientConfig:
+    """Phase 2: Ambient monitoring mode."""
+    enabled: bool = False
+    model: str = "claude-haiku-4-5-20251001"  # Fast cheap model for suggestions
+    min_interval_s: float = 30.0             # Minimum seconds between suggestions
+    speak_suggestions: bool = True           # TTS for ambient suggestions
+
+
+@dataclass
+class MCPServerEntry:
+    name: str = ""
+    command: str = ""
+    args: list = field(default_factory=list)
+    env: dict = field(default_factory=dict)
+
+
+@dataclass
+class MCPConfig:
+    """Phase 2: MCP server connections."""
+    servers: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -71,6 +112,9 @@ class ArcaConfig:
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     memory: MemoryConfig = field(default_factory=MemoryConfig)
     shell: ShellConfig = field(default_factory=ShellConfig)
+    context: ContextConfig = field(default_factory=ContextConfig)
+    ambient: AmbientConfig = field(default_factory=AmbientConfig)
+    mcp: MCPConfig = field(default_factory=MCPConfig)
 
     # Runtime — loaded from environment
     anthropic_api_key: str = field(default_factory=lambda: os.environ.get("ANTHROPIC_API_KEY", ""))
@@ -89,6 +133,12 @@ def _merge(base: dict, override: dict) -> dict:
     return result
 
 
+def _apply_dataclass(cls, raw: dict):
+    """Safely build a dataclass from a dict, ignoring unknown keys."""
+    known = {k for k in cls.__dataclass_fields__}
+    return cls(**{k: raw[k] for k in known if k in raw})
+
+
 def load_config() -> ArcaConfig:
     """Load and merge config from all sources."""
     raw: dict = {}
@@ -105,7 +155,6 @@ def load_config() -> ArcaConfig:
         with open(project_cfg, "rb") as f:
             raw = _merge(raw, tomllib.load(f))
 
-    # 3. Build config object from merged dict
     cfg = ArcaConfig()
 
     arca_raw = raw.get("arca", {})
@@ -114,22 +163,23 @@ def load_config() -> ArcaConfig:
     cfg.ambient_mode = arca_raw.get("ambient_mode", cfg.ambient_mode)
 
     if v := raw.get("voice"):
-        cfg.voice = VoiceConfig(**{k: v[k] for k in VoiceConfig.__dataclass_fields__ if k in v})
-
+        cfg.voice = _apply_dataclass(VoiceConfig, v)
     if t := raw.get("tts"):
-        cfg.tts = TTSConfig(**{k: t[k] for k in TTSConfig.__dataclass_fields__ if k in t})
-
+        cfg.tts = _apply_dataclass(TTSConfig, t)
     if a := raw.get("agent"):
-        cfg.agent = AgentConfig(**{k: a[k] for k in AgentConfig.__dataclass_fields__ if k in a})
-
+        cfg.agent = _apply_dataclass(AgentConfig, a)
     if tl := raw.get("tools"):
-        cfg.tools = ToolsConfig(**{k: tl[k] for k in ToolsConfig.__dataclass_fields__ if k in tl})
-
+        cfg.tools = _apply_dataclass(ToolsConfig, tl)
     if m := raw.get("memory"):
-        cfg.memory = MemoryConfig(**{k: m[k] for k in MemoryConfig.__dataclass_fields__ if k in m})
-
+        cfg.memory = _apply_dataclass(MemoryConfig, m)
     if s := raw.get("shell"):
-        cfg.shell = ShellConfig(**{k: s[k] for k in ShellConfig.__dataclass_fields__ if k in s})
+        cfg.shell = _apply_dataclass(ShellConfig, s)
+    if c := raw.get("context"):
+        cfg.context = _apply_dataclass(ContextConfig, c)
+    if amb := raw.get("ambient"):
+        cfg.ambient = _apply_dataclass(AmbientConfig, amb)
+    if mcp := raw.get("mcp"):
+        cfg.mcp = MCPConfig(servers=mcp.get("servers", []))
 
     return cfg
 
@@ -142,5 +192,5 @@ def _find_project_config() -> Path | None:
         if candidate.exists():
             return candidate
         if (parent / ".git").exists():
-            break  # Don't cross git root
+            break
     return None

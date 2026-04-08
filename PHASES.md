@@ -258,18 +258,254 @@ Both are merged (deep merge), with project config winning. This means you can ha
 ## Phase 2 — Features & MCP Integration
 
 **Goal:** Daily driver for real development work.
-**Planned additions:**
-- Wake word detection (always-on mode via Porcupine)
-- MCP passthrough — connect any existing MCP server
-- Project context detection: auto-reads git root, README, CLAUDE.md
-- Ambient mode: Arca watches your terminal and speaks up proactively
-- Chromadb semantic search over conversation history
-- `arca.toml` per-project tool permissions
+**Status:** Complete — v0.2.0
 
-**Architecture changes:**
-- Add MCP client layer in `arca/agent/mcp_client.py`
-- Add project context loader in `arca/agent/context.py`
-- Add wake word thread in `arca/voice/wakeword.py`
+### What's Built in Phase 2
+
+```
+arca/
+├── arca/
+│   ├── voice/
+│   │   └── wakeword.py         ✓  Always-on wake word (openwakeword / porcupine)
+│   ├── agent/
+│   │   ├── context.py          ✓  Project context auto-detection
+│   │   ├── mcp_client.py       ✓  MCP server connection manager
+│   │   └── ambient.py          ✓  Background error monitor + proactive suggestions
+│   │   ├── loop.py             ✓  Updated: context + semantic memory + MCP tools
+│   │   └── memory.py           ✓  Updated: chromadb semantic search layer
+│   ├── terminal/
+│   │   └── ui.py               ✓  Updated: ambient suggestion rendering
+│   ├── config.py               ✓  Updated: ContextConfig, AmbientConfig, MCPConfig
+│   └── main.py                 ✓  Updated: full Phase 2 boot sequence
+└── arca.toml                   ✓  Phase 2 config sections
+```
+
+---
+
+### Data Flow: How Phase 2 Changes Everything
+
+#### Boot Sequence (new in Phase 2)
+
+```
+1. load_config()
+   └─ Reads ~/.arca/config.toml + project arca.toml
+   └─ Merges deep: project config wins over global
+
+2. detect_project_context()
+   └─ Finds git root (walks up from CWD)
+   └─ Reads: CLAUDE.md (3000 chars), README.md (1500 chars), .cursorrules
+   └─ Runs: git branch, git log -5, git status --short
+   └─ Detects stack: pyproject.toml→Python, package.json→Node, etc.
+   └─ Returns context string → injected into Claude system prompt
+   └─ Claude now KNOWS the project before the first message
+
+3. Memory(semantic_search=True)
+   └─ Opens SQLite at ~/.arca/memory.db
+   └─ Opens chromadb at ~/.arca/vectors/ (persistent PersistentClient)
+   └─ Collection: "arca_messages" with cosine similarity index
+   └─ On each add_message(): indexes text in chromadb (role≠"tool")
+
+4. MCPClient.start() [if servers configured]
+   └─ Spawns asyncio event loop in daemon thread
+   └─ For each configured server:
+        subprocess(command, args, env) → stdio pipes
+        ClientSession.initialize() → handshake
+        list_tools() → get all tool schemas
+        Prefixes: "mcp__{server_name}__{tool_name}"
+   └─ Blocks main thread until all connect (30s timeout)
+   └─ Sessions stay alive indefinitely in the async loop
+
+5. AmbientMonitor.start() [if enabled]
+   └─ Daemon thread with queue.Queue(maxsize=50)
+   └─ Waits for ShellEvent objects from shell_exec tool calls
+   └─ Rate limited: 1 suggestion per 30s minimum
+
+6. AgentLoop(project_context=..., mcp_client=..., ambient_monitor=...)
+   └─ system = BASE_PROMPT + project_context + extra
+   └─ tools = built-in tools + mcp_client.list_tools()
+
+7. WakeWordDetector.start() [if enabled]
+   └─ Daemon thread with sounddevice.InputStream at 16kHz
+   └─ Feeds 1280-sample chunks to openwakeword model
+   └─ When score ≥ threshold → calls voice_trigger() callback
+   └─ Cooldown: 2s between detections
+```
+
+#### Per-Turn Flow (updated in Phase 2)
+
+```
+User speaks/types "fix the failing test"
+    ↓
+AgentLoop.run("fix the failing test")
+    ↓
+Step 1: Semantic search
+  chromadb.query("fix the failing test", n_results=5)
+  └─ Returns up to 5 similar past messages from other sessions
+  └─ These become "ghost" messages prepended to history
+  └─ Claude sees: "Past context: ..." before the conversation
+
+Step 2: memory.load_history()
+  └─ Last 50 messages from current SQLite session
+
+Step 3: messages = semantic_context + current_history
+  └─ Combined list sent to Claude API
+
+Step 4: Claude API call (streaming)
+  └─ System prompt includes project context
+  └─ Tool list includes both built-in + MCP tools
+  └─ Claude might call: shell_exec("pytest") or mcp__github__list_prs(...)
+
+Step 5: Tool dispatch
+  if tool_name.startswith("mcp__"):
+      mcp_client.call_tool(name, args)
+      └─ asyncio.run_coroutine_threadsafe → async loop thread
+      └─ session.call_tool(original_name, args)
+      └─ Returns within 30s timeout
+  else:
+      dispatch_tool(name, args)  ← built-in handlers
+
+Step 6: Ambient feed
+  if tool_name == "shell_exec":
+      ambient_monitor.feed(cmd, stdout, stderr, exit_code)
+      └─ Non-blocking: queue.put_nowait()
+      └─ Background thread checks: exit_code≠0 or error pattern?
+      └─ If yes AND rate limit OK → Claude haiku generates 1-2 sentence hint
+      └─ Callback fires → TUI shows yellow "◉ Arca (ambient)" suggestion
+```
+
+---
+
+### Component Deep Dives (Phase 2)
+
+#### Project Context (arca/agent/context.py)
+
+Detects project type by checking manifest files in git root:
+```
+pyproject.toml  → Python
+package.json    → Node.js
+go.mod          → Go
+Cargo.toml      → Rust
+pom.xml         → Java/Maven
+Dockerfile      → Docker
+*.tf files      → Terraform
+```
+
+Git info: branch, last 5 commits, count of uncommitted changes.
+
+Key files read and truncated:
+- CLAUDE.md: 3000 chars (AI-specific project instructions — most valuable)
+- README.md: 1500 chars (project overview)
+- .cursorrules: 1000 chars (often has project conventions)
+
+This context is injected once into Claude's system prompt at boot.
+It costs ~2K tokens per session but makes Claude immediately useful.
+
+#### MCP Client (arca/agent/mcp_client.py)
+
+Architecture: async sessions in a dedicated thread, sync interface for the agent loop.
+
+```
+Main thread (sync):          Async thread (event loop):
+  mcp_client.call_tool()  →  asyncio.run_coroutine_threadsafe()
+  future.result(30s)      ←  session.call_tool() completes
+```
+
+Tool naming convention:
+  Server name: "github"
+  Original tool: "list_pull_requests"
+  Arca tool key: "mcp__github__list_pull_requests"
+
+Claude sees this prefixed name and calls it naturally.
+We strip the prefix when routing to the correct server session.
+
+Session lifecycle:
+- Sessions opened once at startup, kept alive indefinitely
+- If a server crashes, the async task exits silently
+- Phase 3 will add reconnection logic
+
+#### Semantic Memory (arca/agent/memory.py)
+
+Two-layer memory:
+```
+SQLite (short-term):     Last N messages, exact order, current session
+chromadb (long-term):    All sessions, semantic similarity, any time
+
+Query: "how do I run the tests"
+SQLite: "...3 messages ago you ran: npm test"
+chroma: "...2 weeks ago you and Arca discussed: pytest -v --cov=src"
+Both injected → Claude has full context without re-asking
+```
+
+chromadb uses default embeddings (all-MiniLM-L6-v2, ~80MB, auto-downloaded).
+Tool results are NOT indexed (too noisy; raw JSON pollutes the vector space).
+Only user and assistant text messages are indexed.
+
+#### Ambient Monitor (arca/agent/ambient.py)
+
+Error classification uses regex patterns — intentionally simple and fast:
+- Non-zero exit code (catch-all)
+- Specific patterns: "Error:", "Traceback", "failed to", "command not found", etc.
+
+When triggered:
+```python
+prompt = f"Command: {cmd}\nExit code: {exit_code}\nOutput:\n{output[:800]}\n\nIn one or two sentences, what's the likely cause and fix? Be direct. No preamble."
+```
+Uses claude-haiku-4-5 with max_tokens=150 for fast, cheap, focused responses.
+
+Rate limit: 1 suggestion per 30s to avoid being annoying.
+
+#### Wake Word (arca/voice/wakeword.py)
+
+openwakeword processes 1280-sample chunks (80ms) through an ONNX model.
+Models are small (~1MB each), run on CPU in real-time.
+
+"hey_jarvis" is used as a phonetic proxy for "hey arca" in Phase 2.
+Phase 3 will train a custom "hey arca" model using openWakeWord's
+training pipeline (requires ~30 minutes of wake word audio samples).
+
+Porcupine alternative: Higher accuracy, commercial API key required.
+Good for production, not ideal for open source distribution.
+
+---
+
+### Phase 2 Config Reference
+
+```toml
+# Voice: wake word (new)
+[voice]
+wake_word_enabled = false        # Set true to enable always-on mode
+wake_word_engine = "openwakeword"
+wake_word_model = "hey_jarvis"
+wake_word_threshold = 0.5
+
+# Project context (new)
+[context]
+enabled = true
+read_claude_md = true
+read_readme = true
+read_git_info = true
+max_context_chars = 6000
+
+# Ambient monitoring (new)
+[ambient]
+enabled = false                  # Set true for proactive suggestions
+model = "claude-haiku-4-5-20251001"
+min_interval_s = 30.0
+speak_suggestions = true
+
+# Semantic memory (updated)
+[memory]
+semantic_search = true
+semantic_db_path = "~/.arca/vectors"
+semantic_top_k = 5
+
+# MCP servers (new)
+[[mcp.servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "$GITHUB_TOKEN" }
+```
 
 ---
 
