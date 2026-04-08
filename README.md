@@ -35,13 +35,14 @@ Arca is the only tool that combines: real terminal + voice input + agentic AI re
 git clone https://github.com/jmenzies722/arca
 cd arca
 
-# 2. Install + download models
+# 2. Setup (creates .venv, downloads Whisper + Kokoro models)
 bash scripts/setup.sh
 
 # 3. Set API key
 export ANTHROPIC_API_KEY=sk-ant-...
 
 # 4. Launch
+source .venv/bin/activate
 arca
 ```
 
@@ -51,8 +52,9 @@ arca
 arca                    # Full TUI with voice
 arca --no-voice         # Text-only mode
 arca --text "query"     # One-shot query, then exit
+arca --serve            # WebSocket sidecar for Tauri desktop app
 arca --model claude-opus-4-6  # Override model
-arca --reset            # Fresh conversation
+arca --reset            # Clear all conversation history
 ```
 
 ### Keyboard Shortcuts
@@ -68,8 +70,6 @@ arca --reset            # Fresh conversation
 ---
 
 ## How It Works
-
-Arca has 5 layers. See [PHASES.md](PHASES.md) for deep technical detail.
 
 ```
 Voice Input  →  STT (Whisper)  →  Claude Agent Loop  →  Tools  →  TTS + Display
@@ -88,7 +88,18 @@ Claude uses tool use to autonomously:
 - Search the web
 - Call MCP servers
 
-### Tools Available (Phase 1)
+### Memory
+- **SQLite**: rolling window of last 50 messages (short-term)
+- **chromadb**: semantic search across all sessions (long-term) — Claude remembers relevant past context automatically
+
+### Phase 2 Features
+- **Project Context**: reads CLAUDE.md, README, git status — Claude knows your project before you say a word
+- **MCP Integration**: connect any MCP server (GitHub, Notion, etc.) via `arca.toml`
+- **Ambient Monitor**: background error detection — if a shell command fails, Claude explains why unprompted
+- **Wake Word**: always-on "hey arca" trigger (openwakeword)
+- **Semantic Memory**: chromadb retrieves relevant past exchanges from any session
+
+### Tools Available
 | Tool | What it does |
 |------|-------------|
 | `shell_exec` | Run any shell command |
@@ -97,6 +108,25 @@ Claude uses tool use to autonomously:
 | `file_edit` | Targeted string replacement |
 | `list_dir` | List directory contents |
 | `web_search` | Brave Search API |
+| `mcp__*` | Any tool from connected MCP servers |
+
+---
+
+## Tauri Desktop App (Phase 3)
+
+The `app/` directory contains the Tauri + React desktop app — a native Mac window with xterm.js terminal and Apple dark glass UI.
+
+```bash
+# Start Python sidecar first
+source .venv/bin/activate
+arca --serve
+
+# Then in another terminal, run the Tauri app
+cd app
+npm run tauri dev
+```
+
+The Tauri frontend connects to `ws://127.0.0.1:8765`.
 
 ---
 
@@ -107,11 +137,11 @@ Arca reads `arca.toml` from your project root or `~/.arca/config.toml`.
 ```toml
 [voice]
 stt_model = "base.en"       # tiny.en / base.en / small.en / medium.en / large-v3
-vad_silence_ms = 800        # How long to wait after you stop talking
+vad_silence_ms = 800
 
 [tts]
 engine = "kokoro"           # kokoro (local) | openai (cloud) | none
-voice = "af_heart"          # Kokoro voice ID
+voice = "af_heart"
 
 [agent]
 model = "claude-sonnet-4-6"
@@ -120,6 +150,19 @@ max_tokens = 8096
 [tools]
 shell = true
 web_search = true           # Requires BRAVE_API_KEY
+
+[context]
+enabled = true              # Auto-detect project stack, read CLAUDE.md/README
+
+[ambient]
+enabled = false             # Proactive error suggestions
+
+# Add MCP servers
+[[mcp.servers]]
+name = "github"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "$GITHUB_TOKEN" }
 ```
 
 ---
@@ -140,35 +183,40 @@ OPENAI_API_KEY=sk-...          # Optional: enables OpenAI TTS
 arca/
 ├── arca/
 │   ├── voice/
-│   │   ├── vad.py          # Silero VAD — detects speech start/end
-│   │   ├── stt.py          # faster-whisper — audio → text
-│   │   ├── tts.py          # Kokoro/OpenAI — text → speech
-│   │   └── pipeline.py     # Orchestrates VAD + STT
+│   │   ├── vad.py          # Silero VAD
+│   │   ├── stt.py          # faster-whisper
+│   │   ├── tts.py          # Kokoro/OpenAI TTS
+│   │   ├── pipeline.py     # VAD + STT orchestration
+│   │   └── wakeword.py     # Always-on wake word
 │   ├── agent/
-│   │   ├── loop.py         # Claude agentic loop (think → act → observe)
+│   │   ├── loop.py         # Claude agentic loop
 │   │   ├── tools.py        # Tool schemas + handlers
-│   │   └── memory.py       # SQLite conversation history
+│   │   ├── memory.py       # SQLite + chromadb memory
+│   │   ├── context.py      # Project context detection
+│   │   ├── mcp_client.py   # MCP server connection
+│   │   └── ambient.py      # Background error monitor
 │   ├── terminal/
 │   │   ├── ui.py           # Textual TUI
-│   │   └── shell.py        # PTY shell runner
-│   ├── config.py           # Config loader (arca.toml)
-│   └── main.py             # Entry point + wiring
+│   │   └── shell.py        # PTY shell
+│   ├── server.py           # WebSocket sidecar for Tauri
+│   ├── config.py           # Config loader
+│   └── main.py             # Entry point
+├── app/                    # Tauri desktop app (Phase 3)
+│   ├── src/                # React + xterm.js frontend
+│   └── src-tauri/          # Rust shell
 ├── scripts/
-│   └── setup.sh            # First-run setup
-├── arca.toml               # Default config
-└── PHASES.md               # Technical build documentation
+│   └── setup.sh
+└── arca.toml
 ```
 
 ---
 
 ## Roadmap
 
-See [PHASES.md](PHASES.md) for the full build plan.
-
-- **Phase 1** (now): Python TUI, voice pipeline, Claude tool use, SQLite memory
-- **Phase 2**: Wake word, MCP integration, ambient mode, project context detection
-- **Phase 3**: Tauri + xterm.js production app, plugin system, Ollama local model fallback
-- **Phase 4**: Open source launch, Pro tier, team features
+- **Phase 1** ✅: Python TUI, voice pipeline, Claude tool use, SQLite memory
+- **Phase 2** ✅: Wake word, MCP integration, ambient mode, semantic memory, project context
+- **Phase 3** 🔧: Tauri desktop app, xterm.js, WebSocket sidecar (in progress)
+- **Phase 4**: Open source launch, Pro tier, Homebrew Cask
 
 ---
 

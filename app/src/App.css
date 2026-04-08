@@ -1,0 +1,11 @@
+/* xterm.js overrides */
+.xterm {
+  height: 100%;
+  padding: 8px 4px;
+}
+.xterm-viewport {
+  background: transparent !important;
+}
+.xterm-screen {
+  width: 100% !important;
+}

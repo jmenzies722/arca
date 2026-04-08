@@ -54,6 +54,8 @@ def main(
     reset: bool = typer.Option(False, "--reset", help="Clear conversation history"),
     ambient: bool = typer.Option(False, "--ambient", help="Enable ambient monitoring mode"),
     no_context: bool = typer.Option(False, "--no-context", help="Skip project context detection"),
+    serve: bool = typer.Option(False, "--serve", help="Run as WebSocket sidecar for Tauri app"),
+    port: int = typer.Option(8765, "--port", "-p", help="WebSocket server port (with --serve)"),
     version: bool = typer.Option(False, "--version", "-v", help="Show version"),
 ) -> None:
     """Arca — AI voice agentic terminal."""
@@ -153,8 +155,48 @@ def main(
         _run_one_shot(agent, text)
         return
 
+    # ── WebSocket sidecar mode (for Tauri app) ──────────────────────────────────
+    if serve:
+        _run_serve(config, agent, ambient_monitor, port)
+        return
+
     # ── TUI + Voice mode ────────────────────────────────────────────────────────
     _run_tui(config, agent, ambient_monitor)
+
+
+def _run_serve(config, agent: AgentLoop, ambient_monitor=None, port: int = 8765) -> None:
+    """Run Arca as a WebSocket sidecar for the Tauri desktop app."""
+    import signal
+    from .server import ArcaServer
+
+    tts = None
+    voice_pipeline = None
+
+    if config.voice_enabled:
+        try:
+            tts, voice_pipeline = _init_voice(config)
+        except Exception as e:
+            typer.echo(f"[voice] Failed to initialize: {e}", err=True)
+
+    server = ArcaServer(
+        agent=agent,
+        tts=tts,
+        voice_pipeline=voice_pipeline,
+        port=port,
+    )
+
+    # Wire ambient monitor to push suggestions to the frontend
+    if ambient_monitor:
+        ambient_monitor.on_suggestion = server.emit_ambient
+
+    server.start()
+    typer.echo(f"[arca] Sidecar running on ws://127.0.0.1:{port}")
+    typer.echo("[arca] Waiting for Tauri app to connect. Ctrl+C to stop.")
+
+    try:
+        signal.pause()
+    except (KeyboardInterrupt, AttributeError):
+        pass  # AttributeError on Windows where signal.pause() doesn't exist
 
 
 def _run_one_shot(agent: AgentLoop, text: str) -> None:
