@@ -7,6 +7,7 @@ import "./App.css";
 
 const WS_URL = "ws://127.0.0.1:8765";
 const RECONNECT_DELAY_MS = 2000;
+const CONNECT_TIMEOUT_MS = 3000; // show "Disconnected" only after this long
 
 // ── xterm theme — Apple dark glass ──────────────────────────────────────────
 const TERMINAL_THEME = {
@@ -43,12 +44,13 @@ const STATUS = {
 };
 
 export default function App() {
-  const termRef       = useRef(null);   // DOM node
-  const xtermRef      = useRef(null);   // Terminal instance
-  const fitRef        = useRef(null);   // FitAddon
-  const wsRef         = useRef(null);   // WebSocket
-  const inputRef      = useRef(null);   // Text input DOM
-  const reconnectRef  = useRef(null);   // Reconnect timer
+  const termRef        = useRef(null);   // DOM node
+  const xtermRef       = useRef(null);   // Terminal instance
+  const fitRef         = useRef(null);   // FitAddon
+  const wsRef          = useRef(null);   // WebSocket
+  const inputRef       = useRef(null);   // Text input DOM
+  const reconnectRef   = useRef(null);   // Reconnect timer
+  const errorTimerRef  = useRef(null);   // Delay before showing "Disconnected"
 
   const [status, setStatus]   = useState("connecting");
   const [input, setInput]     = useState("");
@@ -61,8 +63,8 @@ export default function App() {
       fontFamily: '"SF Mono", "JetBrains Mono", "Fira Code", monospace',
       fontSize: 13,
       lineHeight: 1.5,
-      cursorBlink: true,
-      cursorStyle: "bar",
+      cursorBlink: false,   // display-only — input is in the bar below
+      disableStdin: true,   // prevent xterm from capturing keyboard focus
       allowTransparency: true,
       scrollback: 5000,
     });
@@ -76,6 +78,9 @@ export default function App() {
     fitRef.current   = fit;
 
     printWelcome(term);
+
+    // Clicking the terminal area refocuses the input bar
+    termRef.current.addEventListener("click", () => inputRef.current?.focus());
 
     const onResize = () => fit.fit();
     window.addEventListener("resize", onResize);
@@ -94,9 +99,11 @@ export default function App() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setStatus("idle");
+      clearTimeout(errorTimerRef.current);
       clearTimeout(reconnectRef.current);
+      setStatus("idle");
       writeLine(xtermRef.current, "\x1b[2m[arca] Connected to backend\x1b[0m");
+      inputRef.current?.focus();
     };
 
     ws.onmessage = (ev) => {
@@ -135,7 +142,10 @@ export default function App() {
     };
 
     ws.onclose = () => {
-      setStatus("error");
+      // Don't flash "Disconnected" immediately — wait before showing error state
+      // so normal reconnects look like "Connecting..." not a failure cycle
+      clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = setTimeout(() => setStatus("error"), CONNECT_TIMEOUT_MS);
       reconnectRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
     };
 
@@ -146,6 +156,7 @@ export default function App() {
     connect();
     return () => {
       clearTimeout(reconnectRef.current);
+      clearTimeout(errorTimerRef.current);
       wsRef.current?.close();
     };
   }, [connect]);
